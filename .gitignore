@@ -1,1 +1,24 @@
+# Segredos — nunca commitar
 .env
+app/.env
+
+# Ambientes virtuais Python
+.venv/
+app/.venv/
+venv/
+env/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Saídas de transcrição geradas em runtime
+*_chunks/
+transcript.md
+transcript_combined.txt
+summary.txt
+
+# Sistema
+.DS_Store
+Thumbs.db

@@ -29,27 +29,97 @@ class AudioTranscriber:
     """Classe para transcrição de áudio usando OpenAI Whisper API"""
 
     SUPPORTED_FORMATS = ['.m4a', '.mp3', '.wav', '.flac', '.ogg', '.mp4', '.mpeg', '.mpga', '.webm']
-    MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB (limite da API OpenAI)
+    MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB (limite da API OpenAI/Groq)
 
-    def __init__(self, api_key=None, language='en'):
+    # Modelo padrão por provedor. Groq serve o Whisper de graça numa API
+    # compatível com a da OpenAI, então o mesmo SDK atende os dois.
+    DEFAULT_MODELS = {
+        'groq': 'whisper-large-v3',
+        'openai': 'whisper-1',
+    }
+    # Custo estimado por 1k tokens (apenas para o relatório). Groq é gratuito.
+    COST_PER_1K = {
+        'groq': 0.0,
+        'openai': 0.006,
+    }
+    GROQ_BASE_URL = 'https://api.groq.com/openai/v1'
+
+    def __init__(self, api_key=None, language='en', base_url=None, model=None, provider=None):
         """
-        Inicializa o transcritor
+        Inicializa o transcritor.
+
+        Suporta DOIS provedores, ambos na nuvem (nenhum modelo local):
+          - groq   → Whisper large-v3, GRATUITO (GROQ_API_KEY)
+          - openai → whisper-1, pago (OPENAI_API_KEY)
+
+        Seleção do provedor:
+          1. explícito via `provider` / flag --provider / env TRANSCRIBE_PROVIDER
+          2. auto (padrão): usa Groq se GROQ_API_KEY existir, senão OpenAI
 
         Args:
-            api_key: Chave da API OpenAI (se None, busca de OPENAI_API_KEY)
+            api_key: Chave da API (se None, busca a do provedor escolhido)
             language: Código do idioma (en, pt, es, etc.)
+            base_url: Endpoint da API (se None, deduz do provedor)
+            model: Modelo a usar (se None, usa o padrão do provedor)
+            provider: 'groq' | 'openai' | 'auto' (se None, usa env ou auto)
         """
-        if api_key is None:
-            api_key = os.getenv('OPENAI_API_KEY')
+        provider = (provider or os.getenv('TRANSCRIBE_PROVIDER') or 'auto').lower()
+        env_base = base_url or os.getenv('TRANSCRIBE_BASE_URL') or os.getenv('OPENAI_BASE_URL')
+        groq_key = os.getenv('GROQ_API_KEY')
+        openai_key = os.getenv('OPENAI_API_KEY')
+
+        if provider == 'groq':
+            self.provider = 'groq'
+            api_key = api_key or groq_key
+            base_url = env_base or self.GROQ_BASE_URL
             if not api_key:
                 raise ValueError(
-                    "❌ OPENAI_API_KEY não encontrada!\n"
-                    "Configure com: export OPENAI_API_KEY='sua-chave-aqui'"
+                    "❌ Provedor 'groq' selecionado mas GROQ_API_KEY não definida.\n"
+                    "Pegue uma chave gratuita em https://console.groq.com/keys"
                 )
+        elif provider == 'openai':
+            self.provider = 'openai'
+            api_key = api_key or openai_key
+            base_url = env_base
+            if not api_key:
+                raise ValueError(
+                    "❌ Provedor 'openai' selecionado mas OPENAI_API_KEY não definida."
+                )
+        elif api_key:  # auto, com chave passada direto: deduz pelo endpoint/prefixo
+            if (env_base and 'groq' in env_base) or api_key.startswith('gsk_'):
+                self.provider = 'groq'
+                base_url = env_base or self.GROQ_BASE_URL
+            else:
+                self.provider = 'openai'
+                base_url = env_base
+        elif groq_key:  # auto, sem chave: Groq (gratuito) tem prioridade
+            self.provider = 'groq'
+            api_key = groq_key
+            base_url = env_base or self.GROQ_BASE_URL
+        elif openai_key:
+            self.provider = 'openai'
+            api_key = openai_key
+            base_url = env_base
+        else:
+            raise ValueError(
+                "❌ Nenhuma chave de API encontrada!\n"
+                "Groq (gratuito): defina GROQ_API_KEY no .env — https://console.groq.com/keys\n"
+                "OpenAI (pago): defina OPENAI_API_KEY.\n"
+                "Force um provedor com --provider groq|openai."
+            )
 
-        self.client = OpenAI(api_key=api_key)
+        self.default_model = (
+            model or os.getenv('TRANSCRIBE_MODEL')
+            or self.DEFAULT_MODELS.get(self.provider, 'whisper-1')
+        )
+        self.cost_per_1k = self.COST_PER_1K.get(self.provider, 0.006)
+
+        client_kwargs = {'api_key': api_key}
+        if base_url:
+            client_kwargs['base_url'] = base_url
+        self.client = OpenAI(**client_kwargs)
         self.language = language
-        print(f"✅ Cliente OpenAI inicializado!")
+        print(f"✅ Cliente inicializado (provedor: {self.provider}, modelo: {self.default_model})")
 
     def validate_audio_file(self, audio_path, check_size=True):
         """
@@ -283,7 +353,7 @@ class AudioTranscriber:
 
         return False, None, -1
 
-    def transcribe(self, audio_path, model="whisper-1", response_format="text", temperature=0.2, auto_convert=True, auto_split=True, chunk_minutes=2, overlap_seconds=5):
+    def transcribe(self, audio_path, model=None, response_format="text", temperature=0.2, auto_convert=True, auto_split=True, chunk_minutes=2, overlap_seconds=5):
         """
         Transcreve o arquivo de áudio usando API OpenAI
 
@@ -300,6 +370,9 @@ class AudioTranscriber:
         Returns:
             Tuple: (texto transcrito, dicionário de estatísticas)
         """
+        # Resolver o modelo padrão do provedor (Groq: whisper-large-v3 / OpenAI: whisper-1)
+        model = model or self.default_model
+
         # Se auto_split está ativo, não validar tamanho (chunks serão pequenos)
         audio_path = self.validate_audio_file(audio_path, check_size=not auto_split)
         start_time = time.time()
@@ -420,7 +493,7 @@ class AudioTranscriber:
                 processing_time = time.time() - start_time
                 total_words = len(full_transcript.split())
                 estimated_tokens = int(total_words * 1.3)  # Estimativa: 1 palavra ≈ 1.3 tokens
-                estimated_cost = (estimated_tokens / 1000) * 0.006  # $0.006 por 1K tokens
+                estimated_cost = (estimated_tokens / 1000) * self.cost_per_1k
 
                 stats = {
                     'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -494,7 +567,7 @@ class AudioTranscriber:
             transcript_text = str(transcript).strip()
             total_words = len(transcript_text.split())
             estimated_tokens = int(total_words * 1.3)
-            estimated_cost = (estimated_tokens / 1000) * 0.006
+            estimated_cost = (estimated_tokens / 1000) * self.cost_per_1k
 
             stats = {
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -543,7 +616,7 @@ class AudioTranscriber:
                     transcript_text = str(transcript).strip()
                     total_words = len(transcript_text.split())
                     estimated_tokens = int(total_words * 1.3)
-                    estimated_cost = (estimated_tokens / 1000) * 0.006
+                    estimated_cost = (estimated_tokens / 1000) * self.cost_per_1k
 
                     stats = {
                         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -713,7 +786,7 @@ class AudioTranscriber:
 
         with open(summary_path, 'w', encoding='utf-8') as f:
             f.write("=" * 80 + "\n")
-            f.write("RELATÓRIO DE TRANSCRIÇÃO - OpenAI Whisper API\n")
+            f.write(f"RELATÓRIO DE TRANSCRIÇÃO - Whisper ({self.provider})\n")
             f.write("=" * 80 + "\n\n")
 
             # Informações gerais
@@ -792,7 +865,7 @@ class AudioTranscriber:
 def main():
     """Função principal do CLI"""
     parser = argparse.ArgumentParser(
-        description='🎙️  Transcreve arquivos de áudio usando OpenAI Whisper API',
+        description='🎙️  Transcreve arquivos de áudio (Whisper via Groq gratuito ou OpenAI)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Exemplos de uso:
@@ -812,9 +885,10 @@ Exemplos de uso:
   # Usar chave de API específica
   python transcribe.py audio.m4a --api-key sk-...
 
-Configuração da API:
-  Defina a variável de ambiente OPENAI_API_KEY:
-  export OPENAI_API_KEY='sua-chave-aqui'
+Configuração da API (escolha um provedor):
+  Groq (gratuito):  export GROQ_API_KEY='gsk_...'   # https://console.groq.com/keys
+  OpenAI (pago):    export OPENAI_API_KEY='sk-...'
+  Forçar provedor:  --provider groq|openai   (ou env TRANSCRIBE_PROVIDER)
 
 Formatos suportados:
   .m4a, .mp3, .wav, .flac, .ogg, .mp4, .mpeg, .mpga, .webm
@@ -833,7 +907,15 @@ Limite de tamanho:
     parser.add_argument(
         '-k', '--api-key',
         type=str,
-        help='Chave da API OpenAI (ou use OPENAI_API_KEY)'
+        help='Chave da API (ou use GROQ_API_KEY / OPENAI_API_KEY no ambiente)'
+    )
+
+    parser.add_argument(
+        '-p', '--provider',
+        type=str,
+        choices=['auto', 'groq', 'openai'],
+        default=None,
+        help='Provedor: groq (gratuito) | openai (pago) | auto (padrão: detecta pela chave). Também via TRANSCRIBE_PROVIDER.'
     )
 
     parser.add_argument(
@@ -894,7 +976,8 @@ Limite de tamanho:
         # Criar transcritor
         transcriber = AudioTranscriber(
             api_key=args.api_key,
-            language=args.language
+            language=args.language,
+            provider=args.provider
         )
 
         # Transcrever

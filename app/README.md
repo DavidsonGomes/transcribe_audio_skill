@@ -1,6 +1,6 @@
 # 🎙️ Audio Transcriber - OpenAI Whisper
 
-Ferramenta de transcrição de áudio usando a API Whisper da OpenAI. Suporta diversos formatos de áudio incluindo M4A, MP3, WAV, FLAC e outros.
+Ferramenta de transcrição de áudio usando o **Whisper** via **Groq (gratuito)** ou **OpenAI**. Ambos rodam na nuvem (nenhum modelo local). Suporta diversos formatos de áudio incluindo M4A, MP3, WAV, FLAC e outros.
 
 ## 📋 Características
 
@@ -57,28 +57,47 @@ cd transcribe_audio
 pip install -r requirements.txt
 ```
 
-### 3. Configurar API Key da OpenAI
+### 3. Configurar a API Key (Groq ou OpenAI)
 
-Você precisa de uma chave de API da OpenAI. Obtenha em: https://platform.openai.com/api-keys
+O app funciona com **dois provedores**. Escolha um:
 
-#### Opção 1: Variável de ambiente (recomendado)
+| Provedor | Custo | Modelo padrão | Chave | Onde pegar |
+|----------|-------|---------------|-------|------------|
+| **Groq** (recomendado) | **Gratuito** | `whisper-large-v3` | `GROQ_API_KEY` (começa com `gsk_`) | https://console.groq.com/keys |
+| OpenAI | Pago | `whisper-1` | `OPENAI_API_KEY` (começa com `sk-`) | https://platform.openai.com/api-keys |
 
-```bash
-export OPENAI_API_KEY='sua-chave-aqui'
-```
+#### Opção 1: arquivo `.env` (recomendado)
 
-Para tornar permanente, adicione ao seu `~/.bashrc` ou `~/.zshrc`:
-
-```bash
-echo 'export OPENAI_API_KEY="sua-chave-aqui"' >> ~/.zshrc
-source ~/.zshrc
-```
-
-#### Opção 2: Passar via parâmetro
+Copie `.env.example` para `.env` e preencha a chave do provedor escolhido:
 
 ```bash
-python transcribe.py audio.m4a --api-key sk-...
+cp .env.example .env
+# edite .env e defina GROQ_API_KEY=... (ou OPENAI_API_KEY=...)
 ```
+
+O app carrega o `.env` do diretório de trabalho automaticamente.
+
+#### Opção 2: variável de ambiente
+
+```bash
+export GROQ_API_KEY='gsk_...'      # gratuito
+# ou
+export OPENAI_API_KEY='sk-...'     # pago
+```
+
+#### Escolha do provedor
+
+Por padrão o app usa **auto**: se houver `GROQ_API_KEY`, usa Groq; senão usa OpenAI.
+Para forçar, use a flag `--provider` ou a env `TRANSCRIBE_PROVIDER`:
+
+```bash
+python transcribe.py audio.m4a --provider groq       # força Groq
+python transcribe.py audio.m4a --provider openai     # força OpenAI
+python transcribe.py audio.m4a --api-key gsk_...      # chave direto (detecta o provedor)
+```
+
+> **Nota:** o `translate_chunks.py` (tradução opcional) ainda usa a OpenAI (`gpt-4o-mini`)
+> e requer `OPENAI_API_KEY`. A transcrição em si não depende disso.
 
 ## 📖 Uso
 
